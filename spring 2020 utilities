@@ -1,0 +1,103 @@
+#minor edits from Christina's script
+# Load Libraries ----------------------------------------------------------
+
+library(tidyverse) # used to keep things tidy :)
+library(bigrquery) # used to download data from BigQuery
+library(googleAnalyticsR) # used to download data from Google Analytics
+library(googlesheets) # used to upload and retrieve data from Google Sheets
+library(forecast) # used to create seasonalized trend lines
+library(lubridate) # used for date manipulation
+library(zoo) # used for data manipulation
+library(googleVis) # used to create Google Charts visualizations
+library(officer) # used to create Powerpoint slides
+library(tidycensus) # used to access Census Bureau data for region & urban / rural definition
+library(maps)
+library(tools) # used for setting Title Case for variables
+library(readtext)
+library(rvest)
+library(RCurl)
+library(googledrive)
+library(choroplethr)
+library(gridSVG) # keep or not?
+library(searchConsoleR) # for interacting with the Google Search Console API
+library(googleAuthR) # for authenticating Google APIs
+library(devtools)
+devtools::install_github("hairizuanbinnoorazman/googleslides", build_vignettes = TRUE)
+library(rgoogleslides)
+
+# Set Parameters - Global ---------------------------------------------------
+
+# Set directory for locally stored data
+data_directory <- "/Users/crogers/Documents/audience-insights-master/station_analytics/stations/pub_metrics/2020_spring"
+setwd("/Users/crogers/Documents/audience-insights-master/station_analytics/stations/pub_metrics/2020_spring")
+
+# Set variables for Google Sheets
+ss_title_web_metrics <- "PubMetrics - Spring 2020 - Website Data & Plots"
+#ss_title_streaming_metrics <- "PubMetrics - Fall 2019 - Streaming Data & Plots" 
+#ss_title_ondemand_metrics <- "PubMetrics - Fall 2019 - On-Demand Data & Plots"
+
+# Set variables for other data source file paths
+#search_console_file_path <- "/search_console"
+#comscore_file_path <- "/comscore"
+#tunein_file_path <- "/tunein"
+#facebook_file_path <- "/facebook"
+sql_path <- paste0(getwd(), "/SQL/")
+
+# Set Functions - Global --------------------------------------------------
+
+# Function for applying STL trending to data - adds a trend line that moves seasonally with the data
+my_stl_function <- function(data, frequency) {
+  
+  all_data <- data
+  
+  for(i in 2:ncol(data)) {
+    
+    stl <- stl(ts(data[, i], frequency = frequency), s.window = "periodic")
+    rows <- dim(stl$time.series)[1]
+    data_stl <- data.frame(matrix(unlist(stl$time.series), nrow=rows, byrow=F), stringsAsFactors=FALSE) %>%
+      rename(seasonal = X1, trend = X2, remainder = X3) %>%
+      rename_all(funs(paste0(names(data)[i], " ", .)))
+    
+    all_data <- cbind(all_data, data_stl)
+    
+  }
+  
+  #all_data  %>%
+  #  rename_all(funs(stringr::str_replace_all(toupper(.), "_", " ")))
+  
+}
+
+
+# Load Data - Station Metadata -------------------------------------------------
+
+# Get most recent station metadata
+station_metadata <- googlesheets::gs_read(ss = gs_title("NPR Member Stations Table"), ws = "2018-10-08") %>%
+  dplyr::mutate(tsr_bucket = case_when(
+    tsr_msa >= 10000000 ~ "1. X-Large ($10M+)", 
+    tsr_msa >= 5000000 ~ "2. Large ($5M+)",
+    tsr_msa >= 2000000 ~ "3. Medium ($2M+)",
+    tsr_msa > 0 ~ "4. S (<$2M)",
+    TRUE ~ ""))
+
+station_metadata_manual <- googlesheets::gs_read(ss = gs_title("NPR Member Stations Table"), ws = "manual_mapping") %>%
+  rename_all(funs(tolower(gsub(" ", "_", .)))) %>%
+  rename_all(funs(gsub("\\)", "", gsub("\\(", "", .))))
+
+station_metadata_ga_names <- station_metadata_manual %>%
+  tidyr::separate(ga_station_name, into = c("ga_station_name", "ga_station_name_2"), sep = ", ") %>%
+  tidyr::gather("name", "ga_station_name", ga_station_name, ga_station_name_2) %>%
+  dplyr::filter(!is.na(ga_station_name))
+
+station_metadata_call <- station_metadata_manual %>%
+  dplyr::mutate(call = gsub("\\-.*", "", account_name)) %>%
+  dplyr::filter(!is.na(account_name))
+
+#below is for web, streaming tracked by GA
+#streaming_station_sites_org_id <- streaming_station_sites %>%
+#  merge(station_metadata_ga_names[ , c("org_id", "ga_station_name")], by.x = "station", by.y = "ga_station_name", all.x = T)
+
+#streaming_npr_app_legacy_org_id <- streaming_npr_app_legacy %>%
+#  merge(station_metadata_call[ , c("org_id", "call")], by.x = "station_call", by.y = "call", all.x = T)
+
+# Map DMAs to Metro Codes
+dma_mapping <- googlesheets::gs_read(ss = gs_title("NPR Member Stations Table"), ws = "dma_mapping")
