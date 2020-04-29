@@ -1,0 +1,865 @@
+#minor edits from Christina's script
+
+source("R/pubmetrics_spring_2020_utilities.R")
+
+# Set variables for BigQuery data pulls
+web_project = "rock-sorter-93722"
+web_start_date = "2015-01-01"
+web_end_date = "2020-03-31"
+station_table = "rock-sorter-93722.44471567.ga_sessions"
+npr_table = "rock-sorter-93722.53470309.ga_sessions"
+#this may need to be updated - stations that have been pretty consistent
+station_cohort_regex <- "88.1 WVPE|88.9 KETR|89.9 WWNO  New Orleans Public Radio|89.9 WWNO — New Orleans Public Radio|89.9 WWNO New Orleans Public Radio|91.5 KRCC|Alabama Public Radio|Blue Ridge Public Radio|Boise State Public Radio|Capital Community Broadcasting|Capital Public Radio|Cincinnati Public Radio|Colorado Public Radio|Delmarva Public Radio|Hawaii Public Radio|High Plains Public Radio|ideastream|Illinois Public Media|Indiana Public Media / WFIU|Interlochen Public Radio|Iowa Public Radio|Jefferson Public Radio|KACU|KAJX|KALW|KAMU|KANW|KASU|KAWC|KAZU|KBBI|KBIA|KCBX|KCCU|KCND|KCUR|KDAQ|KDLG|KDLG Public Radio|KENW|KERA|KGOU|KIOS|KLCC|KMUW|KNAU|KNBA KBC|KNBA/KBC|KNKX|KOSU|KPBS|KPCW 91.7FM|KPCW 91.9FM|KPLU|KQED|KRCB|KRCC|KRCU|KRVS|KRWG|KSFR|KSJD|KSOR|KSOR/IJPR|KSTX|KSUT Four Corners|KTEP|KTTZ|KUAC|KUAF 91.3 FM Fayetteville|KUAR|KUAZ-AM/FM|KUER|KUNC|KUNM|KUNR Reno Public Radio|KUOW|KUT|KUVO|KVNF|KVPR|KWBU|KWGS|KWIT|KWSU|Louisville Public Media|Maine Public Broadcasting Network (MPBN)|Michigan Radio|minnesota public radio|Mississippi Public Broadcasting|MTPR|Nashville Public Radio|Nevada Public Radio|New England Public Radio|NHPR|NIPR Northeast Indiana Public Radio|North Carolina Public Radio - WUNC|North State Public Radio|northern public radio|Northstate Public Radio|NPR Illinois|Oregon Public Broadcasting|Ozarks Public Radio|PECONIC PUBLIC BROADCASTING|Public Media for North Texas|Red River Radio KDAQ|Rhode Island Public Radio|South Carolina ETV Radio|South Carolina Public Radio|South Dakota Public Broadcasting|St. Louis Public Radio|Tri States Public Radio|Utah Public Radio|Vermont Public Radio|WABE|WAER Syracuse Public Media|WAMC Northeast Public Radio|WAMU|WAMU 88.5|WBAA|WBFO|WBGO|WCBE|WCBU peoria public radio|WCLK|WCPN|WCQS|WCSU|WDIY|WEKU|WEMU 89.1|WESA|WESM|West Virginia Public Broadcasting|WFAE|WFIT|WFPL|WFSU|WFUV|WFYI|WGBH|WGCU|WGLT|White Pine Community Broadcasting|WHQR|WHYY|WIAA|witf|WJCT|WJSU|WKAR|WKMS|WKNO|WKSU|WKU Public R adio|WKU Public Radio|WLRN|WMFE|WMHT|WMKY|WMOT|WMRA|WMUK|WNCW|WNIN|WNMU|WNPR|WPRL|WPSU|WQCS FM|WRKF|WRTI|WRTI-FM|WRVO Public Media|WSCL|WSHU|WSIU Public Braodcasting|WSIU Public Broadcasting|WSKG Public Media|WTEB|WTMD|WUCF|WUCF-FM|WUFT-FM|WUIS|WUKY|WUOT|WUSF Public Media|WUTC|WUWF|WUWM 89.7 FM|WUWM 89.7 FM - Milwaukee Public Radio|WVAS|WVTF & RADIO IQ|WXPN|WXXI Public Broadcasting|WYEP|Wyoming Public Media|WYPR -Your Public Radio|WYPR Your Public Radio|WYSO|WYSU"
+
+# Download Web Metrics -------------------------------------------------------
+
+# Download data for large stations that haven't been consistently sending data to NPR Station Rollup - manually updated in below sheet
+station_web_metrics_manual <- googlesheets::gs_read(ss = googlesheets::gs_title("PubMetrics - Spring 2020 - Missing Stations"), ws = "stations")
+
+# Download station level data for all stations reporting to NPR Station Rollup
+station_web_metrics_all <- bigrquery::query_exec(query = readtext::readtext(paste0(sql_path, "station_web_metrics_sql.txt"))$text,
+                                                 project = web_project,
+                                                 max_pages = Inf,
+                                                 use_legacy_sql = F)  
+
+# Combine all station data with station metadata
+station_web_metrics_all_meta <- station_web_metrics_all %>%
+  dplyr::filter(!station %in% c("WHYY", "WBUR", "Southern California Public Radio", "WOSU Public Media", "Houston Public Media", "KQED", "WBEZ","Indiana Public Media / WFIU")) %>%
+  rbind(station_web_metrics_manual) %>%
+  #dplyr::filter(!station %in% c("WHYY", "Southern California Public Radio")) %>%
+  merge(station_metadata_ga_names[ , c("ga_station_name", "org_id")], by.x = "station", by.y = "ga_station_name", all.x = TRUE) %>%
+  merge(station_metadata_manual[ , c("tsr_bucket", "org_id")], by = "org_id", all.x = TRUE) %>%
+  merge(station_metadata[ , c("crc_format", "org_id")], by = "org_id", all.x = TRUE) %>%
+  dplyr::mutate(format = ifelse(grepl("News", crc_format) & grepl("Classical|Jazz|AAA|Rock|Eclectic|Pop", crc_format), "News/Music", 
+                                ifelse(grepl("News", crc_format) & !grepl("Classical|Jazz|AAA|Rock|Eclectic|Pop", crc_format), "News",
+                                       ifelse(!grepl("News", crc_format) & grepl("Classical|Jazz|AAA|Rock|Eclectic|Pop", crc_format), "Music", "Other/Unknown")))) %>%
+  dplyr::filter(users > 50) %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>% 
+  dplyr::group_by(station) %>%
+  dplyr::mutate(min_over_max = users/max(users)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(min_over_max > 0.01) %>%
+  dplyr::group_by(station) %>%
+  dplyr::mutate(complete_quarters = n_distinct(quarter), complete_months = n_distinct(date)) %>%
+  dplyr::ungroup()
+
+# Download NPR.org data
+npr_web_metrics_all <- bigrquery::query_exec(query = readtext::readtext(paste0(sql_path, "npr_web_metrics_sql.txt"))$text,
+                                             project = web_project,
+                                             max_pages = Inf,
+                                             use_legacy_sql = F)
+
+# Download "Loyal Users" (3+ sessions per user per month) metrics for stations
+station_web_loyal <- bigrquery::query_exec(query = readtext::readtext(paste0(sql_path, "station_web_loyal_users_sql.txt"))$text,
+                                           project = web_project,
+                                           max_pages = Inf,
+                                           use_legacy_sql = F)
+
+# Download "Loyal Users" (3+ sessions per user per month) metrics for NPR.org
+npr_web_loyal <- bigrquery::query_exec(query = readtext::readtext(paste0(sql_path, "npr_web_loyal_users_sql.txt"))$text,
+                                       project = web_project,
+                                       max_pages = Inf,
+                                       use_legacy_sql = F)
+
+
+# Validate station cohort -------------------------------------------------
+
+station_web_cohort <- station_web_metrics_all_meta %>%
+  dplyr::group_by(station, format, date, quarter, tsr_bucket, complete_months, complete_quarters) %>%
+  dplyr::summarise(users = sum(users)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(include = complete_quarters >= max(complete_quarters)) %>%
+  dplyr::select(station, format, tsr_bucket, include, complete_quarters, complete_months, date, users) %>%
+  tidyr::spread(date, users)
+
+write.csv(station_web_cohort, "station_web_cohort.csv", row.names = F, na = "")
+getwd()
+
+# Create table with quarterly station metrics -----------------------------
+
+station_web_metrics_all_clean <- station_web_metrics_all_meta %>%
+  # dplyr::filter(station != "WBUR") %>%
+  # merge(station_web_loyal, by = c("station", "date", "device"), all.x = T, suffixes = c("", "_loyal")) %>%
+  dplyr::group_by(station, date) %>%
+  dplyr::mutate(monthly_users = sum(users)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(complete_quarters >= max(complete_quarters)) %>%
+  dplyr::group_by(quarter, station) %>%
+  dplyr::summarise(users = sum(users)/n_distinct(date)) %>%
+  dplyr::group_by(quarter) %>%
+  dplyr::summarise(users = round(sum(users), 0), station_n_size = n_distinct(station)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(yoy = (users - lag(users, n = 4)) / lag(users, n = 4)) %>%
+  dplyr::mutate(qoq = (users - lag(users, n = 1)) / lag(users, n = 1)) %>%
+  dplyr::rename_all(list(~toTitleCase(gsub("_", " ", .))))
+
+station_web_metrics_format_clean <- station_web_metrics_all_meta %>%
+  # merge(station_web_loyal, by = c("station", "date", "device"), all.x = T, suffixes = c("", "_loyal")) %>%
+  dplyr::group_by(station, date) %>%
+  dplyr::mutate(monthly_users = sum(users)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(complete_quarters >= max(complete_quarters)) %>%
+  dplyr::group_by(quarter, station, format) %>%
+  dplyr::summarise(users = sum(users)/n_distinct(date)) %>%
+  dplyr::group_by(quarter, format) %>%
+  dplyr::summarise(users = round(sum(users), 0), station_n_size = n_distinct(station)) %>%
+  tidyr::gather("metric", "value", users, station_n_size) %>%
+  tidyr::unite("metric", c("format", "metric")) %>%
+  tidyr::spread(metric, value, fill = 0) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate_at(vars(ends_with("users")), funs(yoy = (. - lag(., n = 4)) / lag(., n = 4), 
+                                                  qoq = (. - lag(., n = 1)) / lag(., n = 1))) %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+station_web_metrics_size_clean <- station_web_metrics_all_meta %>%
+  # merge(station_web_loyal, by = c("station", "date", "device"), all.x = T, suffixes = c("", "_loyal")) %>%
+  dplyr::group_by(station, date) %>%
+  dplyr::mutate(monthly_users = sum(users)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(complete_quarters >= max(complete_quarters)) %>%
+  dplyr::group_by(quarter, station, tsr_bucket) %>%
+  dplyr::summarise(users = sum(users)/n_distinct(date)) %>%
+  dplyr::group_by(quarter, tsr_bucket) %>%
+  dplyr::summarise(users = round(sum(users), 0), station_n_size = n_distinct(station)) %>%
+  tidyr::gather("metric", "value", users, station_n_size) %>%
+  tidyr::unite("metric", c("tsr_bucket", "metric")) %>%
+  tidyr::spread(metric, value, fill = 0) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate_at(vars(ends_with("users")), funs(yoy = (. - lag(., n = 4)) / lag(., n = 4), 
+                                                  qoq = (. - lag(., n = 1)) / lag(., n = 1))) %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+station_web_metrics_station_clean <- station_web_metrics_all_meta %>%
+  # dplyr::filter(station != "WBUR") %>%
+  # merge(station_web_loyal, by = c("station", "date", "device"), all.x = T, suffixes = c("", "_loyal")) %>%
+  dplyr::group_by(station, date, tsr_bucket) %>%
+  dplyr::mutate(monthly_users = sum(users)) %>%
+  dplyr::ungroup() %>%
+  # dplyr::filter(complete_quarters >= max(complete_quarters)) %>%
+  dplyr::group_by(quarter, station, tsr_bucket) %>%
+  dplyr::summarise(users = round(sum(users)/n_distinct(date), 0)) %>%
+  dplyr::ungroup() %>%
+  tidyr::spread(quarter, users) %>%
+  dplyr::select(station, tsr_bucket, `2019, Q1`, `2020, Q1`) %>%
+  dplyr::mutate(yoy = (`2020, Q1` - `2019, Q1`)/`2019, Q1`) %>%
+  dplyr::arrange(desc(`2019, Q1`)) #change these quarters
+
+write_csv(station_web_metrics_station_clean, "station_yoy_q1.csv")
+
+npr_web_metrics_all_clean <- npr_web_metrics_all %>%
+  merge(npr_web_loyal, by = c("date", "device"), all.x = T, suffixes = c("", "_loyal")) %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(quarter, date) %>%
+  dplyr::summarise(users = sum(users)) %>%
+  dplyr::group_by(quarter) %>%
+  dplyr::summarise(users = round(mean(users), 0)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(yoy = (users - lag(users, n = 4)) / lag(users, n = 4)) %>%
+  dplyr::mutate(qoq = (users - lag(users, n = 1)) / lag(users, n = 1)) %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Quarterly Metrics (All)", input = station_web_metrics_all_clean)
+googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Quarterly Metrics (Format)", input = station_web_metrics_format_clean)
+googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Quarterly Metrics (Size)", input = station_web_metrics_size_clean)
+googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Quarterly Metrics (All - NPR)", input = npr_web_metrics_all_clean)
+
+station_web_loyal_clean <- station_web_loyal %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>% 
+  dplyr::group_by(station, date) %>%
+  dplyr::filter(station %in% station_web_cohort$station[station_web_cohort$complete_months >= max(station_web_cohort$complete_months)]) %>%
+  dplyr::mutate(users = sum(users)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(!is.na(users)) %>%
+  dplyr::group_by(station) %>%
+  dplyr::mutate(complete_quarters = n_distinct(quarter)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(complete_quarters >= max(complete_quarters)) %>%
+  dplyr::group_by(quarter, station) %>%
+  dplyr::summarise(users = sum(users)/n_distinct(date)) %>%
+  dplyr::group_by(quarter) %>%
+  dplyr::summarise(users = round(sum(users), 0), 
+                   station_n_size = n_distinct(station)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(yoy = (users - lag(users, n = 4)) / lag(users, n = 4)) %>%
+  dplyr::mutate(qoq = (users - lag(users, n = 1)) / lag(users, n = 1)) %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+npr_web_metrics_loyal_clean <- npr_web_metrics_all %>%
+  merge(npr_web_loyal, by = c("date", "device"), all.x = T, suffixes = c("", "_loyal")) %>%
+  dplyr::mutate(users_loyal = ifelse(is.na(users_loyal), 0, users_loyal)) %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(quarter) %>%
+  dplyr::summarise(users_loyal = round(sum(users_loyal)/3, 0)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(yoy = (users_loyal - lag(users_loyal, n = 4)) / lag(users_loyal, n = 4)) %>%
+  dplyr::mutate(qoq = (users_loyal - lag(users_loyal, n = 1)) / lag(users_loyal, n = 1)) %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws= "Quarterly Loyal (All)", input = station_web_loyal_clean)
+googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Quarterly Loyal (All - NPR)", input = npr_web_metrics_loyal_clean)
+
+station_web_metrics_all_clean_month <- station_web_metrics_all_meta %>%
+  dplyr::group_by(station, date) %>%
+  dplyr::mutate(monthly_users = sum(users)) %>%
+  dplyr::ungroup() %>%
+  # dplyr::filter(complete_months >= max(complete_months)) %>%
+  dplyr::group_by(date) %>%
+  dplyr::summarise(users = round(sum(users), 0), station_n_size = n_distinct(station)) %>%
+  dplyr::ungroup() %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+npr_web_metrics_all_clean_month <- npr_web_metrics_all %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(date) %>%
+  dplyr::summarise(users = round(sum(users), 0)) %>%
+  dplyr::ungroup() %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Monthly Metrics (All)", input = station_web_metrics_all_clean_month)
+googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Monthly Metrics (All - NPR)", input = npr_web_metrics_all_clean_month)
+
+
+station_web_metrics_device_clean <- station_web_metrics_all_meta %>%
+  dplyr::group_by(station, date) %>%
+  dplyr::mutate(monthly_users = sum(users)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(complete_quarters >= max(complete_quarters)) %>%
+  dplyr::group_by(quarter, station, device) %>%
+  dplyr::summarise(users = sum(users)/n_distinct(date)) %>%
+  dplyr::group_by(quarter, device) %>%
+  dplyr::summarise(users = round(sum(users), 0), station_n_size = n_distinct(station)) %>%
+  tidyr::gather("metric", "value", -quarter, -device) %>%
+  tidyr::unite("metric", c("device", "metric"), sep = "_") %>%
+  tidyr::spread(metric, value) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate_at(vars(ends_with("users")), funs(yoy = (. - lag(., n = 4)) / lag(., n = 4))) %>%
+  dplyr::mutate_at(vars(ends_with("users")), funs(qoq = (. - lag(., n = 1)) / lag(., n = 1))) %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+npr_web_metrics_device_clean <- npr_web_metrics_all %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(quarter, device) %>%
+  dplyr::summarise(users = round(sum(users)/3, 0)) %>%
+  tidyr::gather("metric", "value", -quarter, -device) %>%
+  tidyr::unite("metric", c("device", "metric"), sep = "_") %>%
+  tidyr::spread(metric, value) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate_at(vars(ends_with("users")), funs(yoy = (. - lag(., n = 4)) / lag(., n = 4))) %>%
+  dplyr::mutate_at(vars(ends_with("users")), funs(qoq = (. - lag(., n = 1)) / lag(., n = 1))) %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Quarterly Metrics (Device)", input = station_web_metrics_device_clean)
+googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Quarterly Metrics (Device - NPR)", input = npr_web_metrics_device_clean)
+
+
+
+station_web_metrics_device_channel <- bigrquery::query_exec(query = readtext::readtext(paste0(sql_path, "station_web_metrics_device_channel_sql.txt"))$text,
+                                                            project = web_project,
+                                                            max_pages = Inf,
+                                                            use_legacy_sql = F)
+
+npr_web_metrics_device_channel <- bigrquery::query_exec(query = readtext::readtext(paste0(sql_path, "npr_web_metrics_device_channel_sql.txt"))$text,
+                                                        project = web_project,
+                                                        max_pages = Inf,
+                                                        use_legacy_sql = F)
+
+station_web_metrics_channel_clean <- station_web_metrics_device_channel %>%
+  dplyr::group_by(station, date) %>%
+  dplyr::mutate(monthly_users = sum(users)) %>%
+  dplyr::group_by(station) %>%
+  dplyr::mutate(complete_months = n_distinct(date), min_over_max = min(monthly_users)/max(monthly_users)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(complete_months >= max(complete_months) & min_over_max > 0.01) %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(quarter, channel) %>%
+  dplyr::summarise(sessions = round(sum(sessions)/3, 0), station_n_size = n_distinct(station)) %>%
+  tidyr::gather("metric", "value", -quarter, -channel) %>%
+  tidyr::unite("metric", c("channel", "metric"), sep = "_") %>%
+  tidyr::spread(metric, value) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(yoy = (. - lag(., n = 4)) / lag(., n = 4))) %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(qoq = (. - lag(., n = 1)) / lag(., n = 1))) %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+npr_web_metrics_channel_clean <- npr_web_metrics_device_channel %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(quarter, channel) %>%
+  dplyr::summarise(sessions = round(sum(sessions)/3, 0)) %>%
+  tidyr::gather("metric", "value", -quarter, -channel) %>%
+  tidyr::unite("metric", c("channel", "metric"), sep = "_") %>%
+  tidyr::spread(metric, value) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(yoy = (. - lag(., n = 4)) / lag(., n = 4))) %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(qoq = (. - lag(., n = 1)) / lag(., n = 1))) %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Quarterly Metrics (Channel)", input = station_web_metrics_channel_clean)
+googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Quarterly Metrics (Channel - NPR)", input = npr_web_metrics_channel_clean)
+
+station_web_metrics_channel_clean_month_agg <- station_web_metrics_device_channel %>%
+  dplyr::mutate(channel = ifelse(grepl("Google Search|Facebook|Direct", channel), channel, "Other")) %>%
+  dplyr::group_by(station, date) %>%
+  dplyr::mutate(monthly_users = sum(users)) %>%
+  dplyr::group_by(station) %>%
+  dplyr::mutate(complete_months = n_distinct(date), min_over_max = min(monthly_users)/max(monthly_users)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(complete_months >= max(complete_months) & min_over_max > 0.01) %>%
+  # dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(date, channel) %>%
+  dplyr::summarise(sessions = sum(sessions), station_n_size = n_distinct(station)) %>%
+  tidyr::gather("metric", "value", -date, -channel) %>%
+  tidyr::unite("metric", c("channel", "metric"), sep = "_") %>%
+  tidyr::spread(metric, value) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(yoy = (. - lag(., n = 4)) / lag(., n = 4))) %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(qoq = (. - lag(., n = 1)) / lag(., n = 1))) %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+npr_web_metrics_channel_clean_month_agg <- npr_web_metrics_device_channel %>%
+  dplyr::mutate(channel = ifelse(grepl("Google Search|Facebook|Direct", channel), channel, "Other")) %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(date, channel) %>%
+  dplyr::summarise(sessions = sum(sessions)) %>%
+  tidyr::gather("metric", "value", -date, -channel) %>%
+  tidyr::unite("metric", c("channel", "metric"), sep = "_") %>%
+  tidyr::spread(metric, value) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(yoy = (. - lag(., n = 4)) / lag(., n = 4))) %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(qoq = (. - lag(., n = 1)) / lag(., n = 1))) %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Monthly Metrics - Agg (Channel)", input = station_web_metrics_channel_clean_month_agg)
+googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Monthly Metrics - Agg (Channel - NPR)", input = npr_web_metrics_channel_clean_month_agg)
+
+
+station_web_metrics_channel_clean_month <- station_web_metrics_device_channel %>%
+  dplyr::group_by(station, date) %>%
+  dplyr::mutate(monthly_users = sum(users)) %>%
+  dplyr::group_by(station) %>%
+  dplyr::mutate(complete_months = n_distinct(date), min_over_max = min(monthly_users)/max(monthly_users)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(complete_months >= max(complete_months) & min_over_max > 0.01) %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(date, channel) %>%
+  dplyr::summarise(sessions = round(sum(sessions), 0), station_n_size = n_distinct(station)) %>%
+  tidyr::gather("metric", "value", -date, -channel) %>%
+  tidyr::unite("metric", c("channel", "metric"), sep = "_") %>%
+  dplyr::arrange(desc(value)) %>%
+  tidyr::spread(metric, value) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(yoy = (. - lag(., n = 4)) / lag(., n = 4))) %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(qoq = (. - lag(., n = 1)) / lag(., n = 1))) %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+npr_web_metrics_channel_clean_month <- npr_web_metrics_device_channel %>%
+  dplyr::group_by(date, channel) %>%
+  dplyr::summarise(sessions = round(sum(sessions), 0)) %>%
+  tidyr::gather("metric", "value", -date, -channel) %>%
+  tidyr::unite("metric", c("channel", "metric"), sep = "_") %>%
+  dplyr::arrange(desc(value)) %>%
+  tidyr::spread(metric, value) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(yoy = (. - lag(., n = 4)) / lag(., n = 4))) %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(qoq = (. - lag(., n = 1)) / lag(., n = 1))) %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Monthly Metrics (Channel)", input = station_web_metrics_channel_clean_month)
+googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Monthly Metrics (Channel - NPR)", input = npr_web_metrics_channel_clean_month)
+
+station_web_metrics_device_channel_clean <- station_web_metrics_device_channel %>%
+  dplyr::group_by(station, date) %>%
+  dplyr::mutate(monthly_users = sum(users)) %>%
+  dplyr::group_by(station) %>%
+  dplyr::mutate(complete_months = n_distinct(date), min_over_max = min(monthly_users)/max(monthly_users)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(complete_months >= max(complete_months) & min_over_max > 0.01) %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(quarter, channel, device) %>%
+  dplyr::summarise(sessions = round(sum(sessions)/3, 0), station_n_size = n_distinct(station)) %>%
+  tidyr::gather("metric", "value", -quarter, -channel, -device) %>%
+  tidyr::unite("metric", c("device", "channel", "metric"), sep = "_") %>%
+  tidyr::spread(metric, value) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(yoy = (. - lag(., n = 4)) / lag(., n = 4))) %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(qoq = (. - lag(., n = 1)) / lag(., n = 1))) %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+npr_web_metrics_device_channel_clean <- npr_web_metrics_device_channel %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(quarter, channel, device) %>%
+  dplyr::summarise(sessions = round(sum(sessions)/3, 0)) %>%
+  tidyr::gather("metric", "value", -quarter, -channel, -device) %>%
+  tidyr::unite("metric", c("device", "channel", "metric"), sep = "_") %>%
+  tidyr::spread(metric, value) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(yoy = (. - lag(., n = 4)) / lag(., n = 4))) %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(qoq = (. - lag(., n = 1)) / lag(., n = 1))) %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Quarterly Metrics (Channel, Device)", input = station_web_metrics_device_channel_clean)
+googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Quarterly Metrics (Channel, Device - NPR)", input = npr_web_metrics_device_channel_clean)
+
+
+station_web_metrics_device_channel_clean_month <- station_web_metrics_device_channel %>%
+  dplyr::group_by(station, date) %>%
+  dplyr::mutate(monthly_users = sum(users)) %>%
+  dplyr::group_by(station) %>%
+  dplyr::mutate(complete_months = n_distinct(date), min_over_max = min(monthly_users)/max(monthly_users)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(complete_months >= max(complete_months) & min_over_max > 0.01) %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(date, channel, device) %>%
+  dplyr::summarise(sessions = round(sum(sessions), 0), station_n_size = n_distinct(station)) %>%
+  tidyr::gather("metric", "value", -date, -channel, -device) %>%
+  tidyr::unite("metric", c("device", "channel", "metric"), sep = "_") %>%
+  tidyr::spread(metric, value) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(yoy = (. - lag(., n = 4)) / lag(., n = 4))) %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(qoq = (. - lag(., n = 1)) / lag(., n = 1))) %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+npr_web_metrics_device_channel_clean_month <- npr_web_metrics_device_channel %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(date, channel, device) %>%
+  dplyr::summarise(sessions = round(sum(sessions), 0)) %>%
+  tidyr::gather("metric", "value", -date, -channel, -device) %>%
+  tidyr::unite("metric", c("device", "channel", "metric"), sep = "_") %>%
+  tidyr::spread(metric, value) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(yoy = (. - lag(., n = 4)) / lag(., n = 4))) %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(qoq = (. - lag(., n = 1)) / lag(., n = 1))) %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+#googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Monthly Metrics (Channel, Device)", input = station_web_metrics_device_channel_clean_month)
+googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Monthly Metrics (Channel, Device - NPR)", input = npr_web_metrics_device_channel_clean_month)
+
+write_csv(station_web_metrics_device_channel_clean_month, "device_channeL_month.csv")
+
+
+station_web_metrics_channel_lp_clean <- station_web_metrics_device_channel %>%
+  dplyr::group_by(station, date) %>%
+  dplyr::mutate(monthly_users = sum(users)) %>%
+  dplyr::group_by(station) %>%
+  dplyr::mutate(complete_months = n_distinct(date), min_over_max = min(monthly_users)/max(monthly_users)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(complete_months >= max(complete_months) & min_over_max > 0.01) %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(quarter, channel, landing_page_type) %>%
+  dplyr::summarise(sessions = round(sum(sessions)/3, 0), station_n_size = n_distinct(station)) %>%
+  tidyr::gather("metric", "value", -quarter, -channel, -landing_page_type) %>%
+  tidyr::unite("metric", c("channel", "landing_page_type", "metric"), sep = "_") %>%
+  tidyr::spread(metric, value) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(yoy = (. - lag(., n = 4)) / lag(., n = 4))) %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(qoq = (. - lag(., n = 1)) / lag(., n = 1))) %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+#googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Quarterly Metrics (Channel, LP)", input = station_web_metrics_channel_lp_clean)
+write_csv(station_web_metrics_channel_lp_clean, "channel_lp_clean.csv")
+
+station_web_metrics_channel_lp_clean_month <- station_web_metrics_device_channel %>%
+  dplyr::group_by(station, date) %>%
+  dplyr::mutate(monthly_users = sum(users)) %>%
+  dplyr::group_by(station) %>%
+  dplyr::mutate(complete_months = n_distinct(date), min_over_max = min(monthly_users)/max(monthly_users)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(complete_months >= max(complete_months) & min_over_max > 0.01) %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(date, channel, landing_page_type) %>%
+  dplyr::summarise(sessions = round(sum(sessions), 0), station_n_size = n_distinct(station)) %>%
+  tidyr::gather("metric", "value", -date, -channel, -landing_page_type) %>%
+  tidyr::unite("metric", c("channel", "landing_page_type", "metric"), sep = "_") %>%
+  tidyr::spread(metric, value) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(yoy = (. - lag(., n = 4)) / lag(., n = 4))) %>%
+  dplyr::mutate_at(vars(ends_with("sessions")), funs(qoq = (. - lag(., n = 1)) / lag(., n = 1))) %>%
+  dplyr::rename_all(funs(toTitleCase(gsub("_", " ", .))))
+
+#googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Monthly Metrics (Channel, LP)", input = station_web_metrics_channel_lp_clean_month)
+
+write_csv(station_web_metrics_channel_lp_clean_month, "channel_lp_month.csv")
+
+#ENGAGEMENT
+
+#original - one quarter, by quarter and channel
+station_web_metrics_engagement <- station_web_metrics_device_channel %>% 
+  dplyr::group_by(station, date) %>%
+  dplyr::mutate(monthly_users = sum(users)) %>%
+  dplyr::group_by(station) %>%
+  dplyr::mutate(complete_months = n_distinct(date), min_over_max = min(monthly_users)/max(monthly_users)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(complete_months >= max(complete_months) & min_over_max > 0.01) %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(quarter, channel) %>%
+  dplyr::summarise(sessions_per_user = round(sum(sessions)/3, 0)/round(sum(users)/3,0), 
+                   pageviews_per_session = round(sum(pageviews)/3,0)/round(sum(sessions)/3,0), 
+                   pageviews_per_user = round(sum(pageviews)/3, 0)/round(sum(users)/3,0), 
+                   prop_new = round(sum(new_users)/3, 0)/round(sum(users)/3,0), 
+                   station_n_size = n_distinct(station)) %>%
+dplyr::filter(quarter == "2020, Q1")
+
+#original - one quarter, by quarter and channel - rounding on outside
+station_web_metrics_engagement_round <- station_web_metrics_device_channel %>% 
+  dplyr::group_by(station, date) %>%
+  dplyr::mutate(monthly_users = sum(users)) %>%
+  dplyr::group_by(station) %>%
+  dplyr::mutate(complete_months = n_distinct(date), min_over_max = min(monthly_users)/max(monthly_users)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(complete_months >= max(complete_months) & min_over_max > 0.01) %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(quarter, channel) %>%
+  dplyr::summarise(sessions_per_user = round((sum(sessions)/3)/(sum(users)/3),2), 
+                   pageviews_per_session = round((sum(pageviews)/3)/(sum(sessions)/3),2), 
+                   pageviews_per_user = round((sum(pageviews)/3)/(sum(users)/3),2), 
+                   prop_new = round((sum(new_users)/3)/(sum(users)/3),2), 
+                   station_n_size = n_distinct(station)) %>%
+  dplyr::filter(quarter == "2020, Q1") 
+
+#quarter
+station_web_metrics_engagement_Quarter <- station_web_metrics_device_channel %>% 
+  dplyr::group_by(station, date) %>%
+  dplyr::mutate(monthly_users = sum(users)) %>%
+  dplyr::group_by(station) %>%
+  dplyr::mutate(complete_months = n_distinct(date), min_over_max = min(monthly_users)/max(monthly_users)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(complete_months >= max(complete_months) & min_over_max > 0.01) %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(quarter) %>%
+  dplyr::summarise(sessions_per_user = round((sum(sessions)/3)/(sum(users)/3),2), 
+                   pageviews_per_session = round((sum(pageviews)/3)/(sum(sessions)/3),2), 
+                   pageviews_per_user = round((sum(pageviews)/3)/(sum(users)/3),2), 
+                   prop_new = round((sum(new_users)/3)/(sum(users)/3),2), 
+                   station_n_size = n_distinct(station)) #%>%
+#dplyr::filter(quarter >= "2020, Q1") #EDIT THIS
+
+#googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Quarterly Engagement Metrics (Channel)", input = station_web_metrics_channel_engagement)
+write_csv(station_web_metrics_engagement_Quarter, "Quarter_station_engagement.csv")
+
+#month
+station_web_metrics_engagement_Month <- station_web_metrics_device_channel %>% 
+  dplyr::group_by(station, date) %>%
+  dplyr::mutate(monthly_users = sum(users)) %>%
+  dplyr::group_by(station) %>%
+  dplyr::mutate(complete_months = n_distinct(date), min_over_max = min(monthly_users)/max(monthly_users)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(complete_months >= max(complete_months) & min_over_max > 0.01) %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(date, quarter) %>%
+  dplyr::summarise(sessions_per_user = round((sum(sessions))/(sum(users)),2), 
+                   pageviews_per_session = round((sum(pageviews))/(sum(sessions)),2), 
+                   pageviews_per_user = round((sum(pageviews))/(sum(users)),2), 
+                   prop_new = round((sum(new_users))/(sum(users)),2), 
+                   station_n_size = n_distinct(station)) #%>%
+#dplyr::filter(quarter >= "2020, Q1") #EDIT THIS
+
+#googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Monthly Engagement Metrics (Channel)", input = station_web_metrics_channel_engagement)
+write_csv(station_web_metrics_engagement_Month, "Month_station_engagement.csv")
+
+#quarter by channel
+station_web_metrics_channel_engagement_Quarter <- station_web_metrics_device_channel %>% 
+  dplyr::group_by(station, date) %>%
+  dplyr::mutate(monthly_users = sum(users)) %>%
+  dplyr::group_by(station) %>%
+  dplyr::mutate(complete_months = n_distinct(date), min_over_max = min(monthly_users)/max(monthly_users)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(complete_months >= max(complete_months) & min_over_max > 0.01) %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(quarter, channel) %>%
+  dplyr::summarise(sessions_per_user = round((sum(sessions)/3)/(sum(users)/3),2), 
+                   pageviews_per_session = round((sum(pageviews)/3)/(sum(sessions)/3),2), 
+                   pageviews_per_user = round((sum(pageviews)/3)/(sum(users)/3),2), 
+                   prop_new = round((sum(new_users)/3)/(sum(users)/3),2), 
+                   station_n_size = n_distinct(station)) #%>%
+#dplyr::filter(quarter >= "2020, Q1") #EDIT THIS
+
+#googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Quarterly Engagement Metrics (Channel)", input = station_web_metrics_channel_engagement)
+write_csv(station_web_metrics_channel_engagement_Quarter, "Quarter_station_channel_engagement.csv")
+
+#month by channel
+station_web_metrics_channel_engagement_Month <- station_web_metrics_device_channel %>% 
+  dplyr::group_by(station, date) %>%
+  dplyr::mutate(monthly_users = sum(users)) %>%
+  dplyr::group_by(station) %>%
+  dplyr::mutate(complete_months = n_distinct(date), min_over_max = min(monthly_users)/max(monthly_users)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(complete_months >= max(complete_months) & min_over_max > 0.01) %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::group_by(date, quarter, channel) %>%
+  dplyr::summarise(sessions_per_user = round((sum(sessions))/(sum(users)),2), 
+                   pageviews_per_session = round((sum(pageviews))/(sum(sessions)),2), 
+                   pageviews_per_user = round((sum(pageviews))/(sum(users)),2), 
+                   prop_new = round((sum(new_users))/(sum(users)),2), 
+                   station_n_size = n_distinct(station)) #%>%
+#dplyr::filter(quarter >= "2020, Q1") #EDIT THIS
+
+#googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Monthly Engagement Metrics (Channel)", input = station_web_metrics_channel_engagement)
+write_csv(station_web_metrics_channel_engagement_Month, "Month_station_channel_engagement.csv")
+
+# Sessions by Page Type ---------------------------------------------------
+
+station_sessions_by_page_type <- bigrquery::query_exec(query = readtext::readtext(paste0(sql_path, "station_sessions_page_type_sql.txt"))$text,
+                                                       project = web_project,
+                                                       max_pages = Inf,
+                                                       use_legacy_sql = F)
+
+station_sessions_by_page_type_clean <- station_sessions_by_page_type %>%
+  dplyr::filter(!(grepl('WBUR|Southern California Public Radio', station))) %>%
+  dplyr::mutate(page_type_new = case_when(grepl('Home|home', page_type) | grepl('Home', page_new) ~ "Homepage",
+                                          grepl('About|about|Contact|contact', page_type) | grepl('Contact', page_new) ~ "Contact/About",
+                                          grepl('Calendar|calendar|Event|event', page_type) | grepl('Calendar', page_new) ~ "Calendar/Event",
+                                          grepl('Schedule|schedule', page_type) | grepl('Schedule', page_new) ~ "Schedule",
+                                          grepl('Show|show|Program|program', page_type) | grepl('Show', page_new) ~ "Show/Program",
+                                          grepl('Story|story|Article|article', page_type) | grepl('Story', page_new) ~ "Story",
+                                          grepl('Search|search', page_type) | grepl('Search', page_new) ~ "Search",
+                                          grepl('Stream|stream', page_type) | grepl('Streaming', page_new) ~ "Streaming",
+                                          grepl('Support|support', page_type) | grepl('Support', page_new) ~ "Support",
+                                          grepl('People|people|Person|person', page_type) | grepl('People', page_new) ~ "People",
+                                          grepl('Playlist|playlist', page_type) | grepl('Playlist', page_new) ~ "Playlist",
+                                          grepl('Collection|collection|Series|series', page_type) | grepl('Collection', page_new) ~ "Collection/Series",
+                                          TRUE ~ "Other"),
+                device = toTitleCase(device)) %>%
+  dplyr::group_by(station) %>%
+  dplyr::mutate(count_cat = n_distinct(page_type_new)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(quarter = stringr::str_replace(lubridate::quarter(ymd(date), with_year = T), "\\.", ", Q")) %>%
+  dplyr::filter(count_cat >= max(count_cat)-4) %>%
+  dplyr::group_by(quarter, page_type_new) %>%
+  dplyr::summarise(pageviews = sum(pageviews)) %>%
+  dplyr::ungroup() %>%
+  tidyr::spread(page_type_new, pageviews, fill = 0)
+
+#googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Monthly Metrics (Page Type)", input = station_sessions_by_page_type_clean)
+write_csv(station_sessions_by_page_type_clean, "sessions_page_type_Q120.csv")
+
+station_sessions_by_page_type_device_clean <- station_sessions_by_page_type %>%
+  dplyr::filter(date >= as.Date("2017-07-01")) %>%
+  dplyr::filter(!(grepl('WBUR|Southern California Public Radio', station))) %>%
+  dplyr::mutate(page_type_new = case_when(grepl('Home|home', page_type) | grepl('Home', page_new) ~ "Homepage",
+                                          grepl('About|about|Contact|contact', page_type) | grepl('Contact', page_new) ~ "Contact/About",
+                                          grepl('Calendar|calendar|Event|event', page_type) | grepl('Calendar', page_new) ~ "Calendar/Event",
+                                          grepl('Schedule|schedule', page_type) | grepl('Schedule', page_new) ~ "Schedule",
+                                          grepl('Show|show|Program|program', page_type) | grepl('Show', page_new) ~ "Show/Program",
+                                          grepl('Story|story|Article|article', page_type) | grepl('Story', page_new) ~ "Story",
+                                          grepl('Search|search', page_type) | grepl('Search', page_new) ~ "Search",
+                                          grepl('Stream|stream', page_type) | grepl('Streaming', page_new) ~ "Streaming",
+                                          grepl('Support|support', page_type) | grepl('Support', page_new) ~ "Support",
+                                          grepl('People|people|Person|person', page_type) | grepl('People', page_new) ~ "People",
+                                          grepl('Playlist|playlist', page_type) | grepl('Playlist', page_new) ~ "Playlist",
+                                          grepl('Collection|collection|Series|series', page_type) | grepl('Collection', page_new) ~ "Collection/Series",
+                                          TRUE ~ "Other"),
+                device = toTitleCase(device)) %>%
+  dplyr::group_by(station) %>%
+  dplyr::mutate(count_cat = n_distinct(page_type_new)) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(count_cat >= max(count_cat)-4) %>%
+  dplyr::group_by(device, page_type_new) %>%
+  dplyr::summarise(pageviews = sum(pageviews)) %>%
+  dplyr::ungroup() %>%
+  tidyr::spread(device, pageviews, fill = 0) %>%
+  dplyr::mutate_if(is.numeric, funs(./sum(.)))
+
+#googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Page Type / Device", input = station_sessions_by_page_type_device_clean)
+write_csv(station_sessions_by_page_type_device_clean, "sessions_page_type_device_Q120.csv")
+
+# Top Content -------------------------------------------------------------
+#HERE
+# Create function to pull top content (by pageviews and by pageview deviation)
+query_ga_top_content <- function(project, table_name, start_date, end_date) {
+  
+  sql <- paste0("SELECT
+                *,
+                (pageviews - avg_pageviews) / avg_pageviews AS pageview_deviation_avg,
+                (pageviews - median_pageviews) / median_pageviews AS pageview_deviation_median
+                FROM (
+                SELECT
+                *,
+                AVG(pageviews) OVER (PARTITION BY hostname) AS avg_pageviews,
+                PERCENTILE_CONT(pageviews, 0.5) OVER (PARTITION BY hostname) AS median_pageviews
+                FROM (
+                SELECT
+                CASE
+                WHEN station IS NULL THEN UPPER(hostname)
+                ELSE station
+                END AS station,
+                hostname,
+                CONCAT(hostname, page_path) AS page_url,
+                category,
+                published_date,
+                pageviews,
+                entrances,
+                new_sessions,
+                sessions
+                FROM (
+                SELECT
+                (SELECT MAX(IF(index = 6, value, NULL)) FROM UNNEST(hits.customDimensions)) AS station,
+                REGEXP_REPLACE(hits.page.hostname, r'www.|ww2.|www2.', '') AS hostname,
+                hits.page.pagePath AS page_path,
+                ANY_VALUE((SELECT MAX(IF(index = 10, value, NULL)) FROM UNNEST(hits.customDimensions))) AS category,
+                ANY_VALUE((SELECT MAX(IF(index = 17, value, NULL)) FROM UNNEST(hits.customDimensions))) AS published_date,
+                COUNT(*) AS pageviews,
+                SUM(IF(hits.isEntrance IS TRUE, 1, 0)) AS entrances,
+                SUM(totals.newVisits) AS new_sessions,
+                SUM(totals.visits) AS sessions
+                FROM
+                `rock-sorter-93722.44471567.ga_sessions_*`, UNNEST(hits) AS hits
+                WHERE
+                _TABLE_SUFFIX BETWEEN '", 
+                stringr::str_replace_all(as.Date(as.yearmon(start_date)), '-', ''),
+                "'AND '",
+                stringr::str_replace_all(end_date, '-', ''),
+                "' 
+                AND hits.type LIKE 'PAGE'
+                AND REGEXP_CONTAINS(hits.page.pagePath, r'/articles|/post/|/webclip/|/blog/|/newsarticles|segmentid=|/hpmnews/|/series/|/wireready/news/|type=story|/wskg_news/|/news-opinion/|/ctl/ViewItem/|/newsarticle/|/story/|/mobile/[0-9]*|news/[1-2].*/|/(items?)/[0-9]*|/[0-9]{4}/[0-1][0-9]/|/feature/[a-z]|/news/(story/|/[0-9]{2}/[0-9]{2}/|[1-2].*/|.*[0-9]$)|/series/.*[0-9]$/wbez-news')
+                GROUP BY
+                1,
+                2,
+                3)
+                WHERE
+                pageviews > 1000))")
+  
+  bigrquery::query_exec(sql, project, use_legacy_sql = F, max_pages = Inf) %>%
+    mutate(pageview_rank = dense_rank(desc(pageviews))) %>%
+    mutate(pageview_deviation_avg_rank = dense_rank(desc(pageview_deviation_avg))) %>%
+    mutate(pageview_deviation_median_rank = dense_rank(desc(pageview_deviation_median))) %>%
+    filter(pageview_rank <= 100 | pageview_deviation_avg_rank <= 100 | pageview_deviation_median_rank <= 100)
+  
+}
+
+# Create function to pull top source of content
+query_ga_top_content_sources <- function(project, table_name, start_date, end_date) {
+  
+  sql <- paste0("SELECT
+                page_url,
+                source,
+                pageviews
+                FROM (
+                SELECT
+                *,
+                MAX(pageviews) OVER (PARTITION BY page_url) AS max_pageviews
+                FROM (
+                SELECT
+                CONCAT(REGEXP_REPLACE(hits.page.hostname, r'www.|ww2.|www2.', ''), hits.page.pagepath) AS page_url,
+                trafficSource.source as source,
+                COUNT(*) AS pageviews
+                FROM
+                `rock-sorter-93722.44471567.ga_sessions_*`, UNNEST(hits) AS hits
+                WHERE
+                _TABLE_SUFFIX BETWEEN '", 
+                stringr::str_replace_all(as.Date(as.yearmon(start_date)), '-', ''),
+                "'AND '",
+                stringr::str_replace_all(end_date, '-', ''),
+                "' 
+                AND hits.type LIKE 'PAGE'
+                AND REGEXP_CONTAINS(hits.page.pagePath, r'/articles|/post/|/webclip/|/blog/|/newsarticles|segmentid=|/hpmnews/|/series/|/wireready/news/|type=story|/wskg_news/|/news-opinion/|/ctl/ViewItem/|/newsarticle/|/story/|/mobile/[0-9]*|news/[1-2].*/|/(items?)/[0-9]*|/[0-9]{4}/[0-1][0-9]/|/feature/[a-z]|/news/(story/|/[0-9]{2}/[0-9]{2}/|[1-2].*/|.*[0-9]$)|/series/.*[0-9]$/wbez-news')
+                GROUP BY
+                1,
+                2)
+                WHERE
+                pageviews > 1000)
+                WHERE pageviews = max_pageviews")
+  
+  bigrquery::query_exec(sql, project, use_legacy_sql = F, max_pages = Inf) 
+  
+  
+}
+
+siteMonthlyTopContent <- query_ga_top_content(web_project, station_table, start_date = as.Date("2019-10-01"), end_date = as.Date("2020-03-31"))
+siteMonthlyTopContentSources <- query_ga_top_content_sources(web_project, station_table, start_date = as.Date("2019-10-01"), end_date = as.Date("2020-03-31"))
+
+fullMonthlyTopContent <- siteMonthlyTopContent %>%
+  merge(siteMonthlyTopContentSources, by = "page_url", all.x = T, suffixes = c("", "_from_top_source")) %>%
+  dplyr::mutate(pageviews_from_top_source = round(pageviews_from_top_source/pageviews, 4)) %>%
+  dplyr::mutate(source = toupper(gsub("m.|.com|\\(|\\)", "", source))) %>%
+  dplyr::mutate(station = toupper(station)) %>%
+  dplyr::arrange(desc(pageviews)) %>%
+  dplyr::top_n(30, pageviews)
+
+googlesheets::gs_edit_cells(ss = googlesheets::gs_title(ss_title_web_metrics), ws = "Top Stories", input = fullMonthlyTopContent)  
+
+
+
+# Station Facebook by City YOY --------------------------------------------
+
+station_facebook_lat_long_yoy <- bigrquery::query_exec(query = readtext::readtext(paste0(sql_path, "station_facebook_yoy_sql.txt"))$text,
+                                                       project = web_project,
+                                                       max_pages = Inf,
+                                                       use_legacy_sql = F) %>%
+  dplyr::mutate(y = as.numeric(latitude), x = as.numeric(longitude)) %>%
+  dplyr::filter(!(x == 0 & y == 0))
+
+options(tigris_class = "sp")
+counties_sf <- tigris::counties(cb = TRUE)
+
+library(rgeos)
+library(sp)
+library(rgdal)
+
+station_facebook_lat_long_yoy_sp <- station_facebook_lat_long_yoy
+
+coordinates(station_facebook_lat_long_yoy_sp) <- ~ x + y
+
+proj4string(station_facebook_lat_long_yoy_sp) <- proj4string(counties_sf)
+
+station_facebook_by_county <- cbind(station_facebook_lat_long_yoy, sp::over(station_facebook_lat_long_yoy_sp, counties_sf)) %>%
+  dplyr::group_by(STATEFP, COUNTYFP, COUNTYNS, AFFGEOID, GEOID, NAME) %>%
+  dplyr::summarise(sessions_t1 = sum(sessions_t1, na.rm = T),
+                   sessions_t2 = sum(sessions_t2, na.rm = T)) %>%
+  dplyr::filter(!is.na(COUNTYFP)) %>%
+  dplyr::mutate(county_fips = paste0(STATEFP, COUNTYFP))
+
+
+# station_facebook_counties <- station_facebook_city_yoy %>%
+#   dplyr::mutate(city = gsub(" Township", "", gsub(" [c|C]harter Township", "", gsub("Ste\\.", "Sainte", gsub("St\\.", "Saint", city))))) %>%
+#   merge(cities, by.x = c("city", "region"), by.y = c("city", "state_name"), all.x = T) %>%
+#   dplyr::mutate(county_fips = str_pad(county_fips, 5, "left", "0")) %>%
+#   dplyr::group_by(county_fips) %>%
+#   dplyr::summarise(sessions_t1 = sum(sessions_t1, na.rm = T),
+#                    sessions_t2 = sum(sessions_t2, na.rm = T))
+
+
+station_facebook_by_county %>% 
+  dplyr::filter(sessions_t1 >= 20 | sessions_t2 >= 20) %>%
+  full_join(urbnmapr::counties, by = "county_fips") %>%
+  full_join(urbnmapr::countydata, by = "county_fips") %>%
+  dplyr::mutate(sessions_t1 = ifelse(is.na(sessions_t1) | sessions_t1 <= 0, NA, sessions_t1),
+                sessions_t2 = ifelse(is.na(sessions_t2) | sessions_t2 <= 0, NA, sessions_t2)) %>%
+  dplyr::mutate(yoy = (sessions_t2 - sessions_t1)/sessions_t1) %>%
+  dplyr::mutate(yoy = ifelse(yoy > 2, 2, yoy)) %>%
+  ggplot(mapping = aes(long, lat, group = group, fill = yoy)) +
+  geom_polygon(color = "grey", size = .25) +
+  scale_fill_gradientn(labels = scales::percent,
+                       guide = guide_colorbar(title.position = "top"),
+                       limits=c(-2,2),
+                       colours = c("#720c0c", "#e26363", "#e8f6fa", "#71bda0", "#1c471b"),
+                       na.value = "white") +
+  # coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  theme(legend.title = element_text(),
+        legend.key.width = unit(.3, "in")) +
+  labs(fill = "Facebook Referral Growth, YOY") + 
+  theme_classic() 
+
+
+station_facebook_counties %>% 
+  # dplyr::filter(sessions_t1 >= 20 | sessions_t2 >= 20) %>%
+  full_join(urbnmapr::counties, by = "county_fips") %>%
+  full_join(urbnmapr::countydata, by = "county_fips") %>%
+  dplyr::mutate(sessions_t1 = ifelse(is.na(sessions_t1) | sessions_t1 <= 0, NA, sessions_t1),
+                sessions_t2 = ifelse(is.na(sessions_t2) | sessions_t2 <= 0, NA, sessions_t2)) %>%
+  #dplyr::mutate(yoy = (sessions_t2 - sessions_t1)/sessions_t1) %>%
+  #dplyr::mutate(yoy = ifelse(yoy > 2, 2, yoy)) %>%
+  dplyr::mutate(yoy = sessions_t2/hhpop) %>%
+  dplyr::mutate(yoy = ifelse(yoy > 0.25, 0.25, yoy)) %>%
+  ggplot(mapping = aes(long, lat, group = group, fill = yoy)) +
+  geom_polygon(color = "grey", size = .25) +
+  scale_fill_gradientn(labels = scales::percent,
+                       guide = guide_colorbar(title.position = "top"),
+                       # limits=c(-2,2),
+                       colours = c("#e8f6fa", "#71bda0", "#1c471b"),
+                       na.value = "white") +
+  # coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+  theme(legend.title = element_text(),
+        legend.key.width = unit(.3, "in")) +
+  labs(fill = "Facebook Referral Growth, YOY") + 
+  theme_classic() 
+
+ttpl
